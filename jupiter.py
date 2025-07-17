@@ -1,29 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import concurrent.futures
-import re
 import json
-import time
 import os
+import re
 import sys
-from urllib.parse import urlparse, parse_qs
+import time
+import requests
 from datetime import datetime
-
-# Verificar dependências antes de continuar
-try:
-    import requests
-except ImportError:
-    print("\033[91m[!] A biblioteca 'requests' não está instalada.\033[0m")
-    print("\033[93m[*] Instalando dependências necessárias...\033[0m")
-    try:
-        import pip
-        pip.main(['install', 'requests==2.31.0'])
-        import requests
-        print("\033[92m[+] Dependências instaladas com sucesso!\033[0m")
-    except:
-        print("\033[91m[!] Falha na instalação automática. Por favor, instale manualmente:")
-        print("    pip install requests==2.31.0\033[0m")
-        sys.exit(1)
+from urllib.parse import urlparse
 
 # Cores para output
 GREEN = "\033[92m"
@@ -48,8 +33,9 @@ def display_banner():
           ░  ░    ░  ░ ░  ░ ░       ░  ░  ░
                          ░                 
 {ENDC}{CYAN}
-       Advanced API Key Validator v2.1
+       Advanced API Key Validator v2.2
      Developed for Security Professionals
+     by GOUD3REN
 {ENDC}""")
     print(f"{YELLOW}⚠️  Use apenas para testes autorizados ⚠️{ENDC}\n")
 
@@ -66,15 +52,15 @@ class Jupiter:
             'endpoints_tested': 0
         }
         
-        # Configurar sessão HTTP persistente
+        # Configurar sessão HTTP
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Jupiter/2.1",
+            "User-Agent": "Jupiter/2.2",
             "Accept": "application/json"
         })
         
         # Configurar proxy se especificado
-        if self.args.proxy:
+        if getattr(self.args, 'proxy', None):
             self.session.proxies = {
                 'http': self.args.proxy,
                 'https': self.args.proxy
@@ -84,21 +70,20 @@ class Jupiter:
         # Configurações de autenticação
         self.auth_config = {
             'type': self.args.auth_type,
-            'param': self.args.key_param,
-            'location': self.args.key_location
+            'param': getattr(self.args, 'key_param', None)
         }
         
         # Configurações de requisição
         self.request_config = {
-            'method': self.args.method,
-            'data': self.args.data,
+            'method': getattr(self.args, 'method', 'GET'),
+            'data': getattr(self.args, 'data', None),
             'headers': self.parse_custom_headers()
         }
 
     def parse_custom_headers(self):
         """Analisa cabeçalhos personalizados fornecidos"""
         headers = {}
-        if self.args.header:
+        if getattr(self.args, 'header', None):
             for header in self.args.header:
                 if ':' in header:
                     key, value = header.split(':', 1)
@@ -115,8 +100,11 @@ class Jupiter:
                 print(f"{CYAN}[*] Carregados {len(endpoints)} endpoints do arquivo{ENDC}")
             else:
                 endpoints = [self.args.endpoint]
-        else:
+        elif self.args.domain:
             endpoints = self.detect_endpoints()
+        else:
+            print(f"{RED}[!] Nenhum endpoint ou domínio fornecido{ENDC}")
+            sys.exit(1)
         return endpoints
 
     def load_keys(self):
@@ -131,42 +119,69 @@ class Jupiter:
             return keys
 
     def detect_endpoints(self):
-        """Detecta endpoints automaticamente para o domínio"""
+        """Detecção aprimorada de endpoints"""
         if not self.args.domain:
-            print(f"{RED}[!] Domínio necessário para detecção automática de endpoints{ENDC}")
+            print(f"{RED}[!] Domínio necessário para detecção de endpoints{ENDC}")
             sys.exit(1)
             
-        print(f"{CYAN}[*] Iniciando detecção automática de endpoints para {self.args.domain}{ENDC}")
+        print(f"{CYAN}[*] Detectando endpoints para {self.args.domain}{ENDC}")
         
+        # Lista expandida de endpoints comuns
         common_endpoints = [
-            "/api/v1/auth",
-            "/oauth/token",
-            "/graphql",
-            "/rest/v1/auth",
-            "/api/auth",
-            "/v1/authenticate",
-            "/auth",
-            "/token",
-            "/login",
-            "/api/login",
-            "/api/token"
+            "/api/v1/auth", "/oauth/token", "/graphql", "/rest/v1/auth",
+            "/api/auth", "/v1/authenticate", "/auth", "/token", "/login",
+            "/api/login", "/api/token", "/v2/auth", "/identity/connect/token",
+            "/authentication", "/session", "/oauth2/token", "/user/login",
+            "/account/login", "/api/v2/auth", "/connect/token"
+        ]
+        
+        # Endpoints específicos baseados no domínio
+        domain_endpoints = [
+            "/_api/auth", "/_api/login", "/api/graphql", "/backend/auth",
+            "/admin-api", "/console/auth", "/v3/auth", "/internal/auth"
         ]
         
         detected = []
-        for endpoint in common_endpoints:
-            url = f"{self.args.domain}{endpoint}"
-            try:
-                response = self.session.head(url, timeout=3)
-                if response.status_code < 400:
-                    detected.append(url)
-                    print(f"{GREEN}[+] Endpoint detectado: {url}{ENDC}")
-            except Exception as e:
-                if self.args.verbose:
-                    print(f"{YELLOW}[!] Erro ao testar {url}: {str(e)}{ENDC}")
-                continue
+        for endpoint in set(common_endpoints + domain_endpoints):
+            for scheme in ["https", "http"]:
+                # Construir URL completa
+                domain = self.args.domain
+                if not domain.startswith("http"):
+                    domain = f"https://{domain}"
+                
+                netloc = urlparse(domain).netloc
+                if not netloc:
+                    netloc = domain
+                
+                url = f"{scheme}://{netloc}{endpoint}"
+                try:
+                    response = self.session.head(
+                        url, 
+                        timeout=3,
+                        allow_redirects=False
+                    )
+                    if response.status_code < 400:
+                        detected.append(url)
+                        print(f"{GREEN}[+] Endpoint detectado: {url}{ENDC}")
+                    # Verificar redirecionamentos
+                    elif 300 <= response.status_code < 400:
+                        redirect_url = response.headers.get('Location', '')
+                        if redirect_url and urlparse(redirect_url).netloc == urlparse(url).netloc:
+                            detected.append(redirect_url)
+                            print(f"{YELLOW}[+] Endpoint via redirecionamento: {redirect_url}{ENDC}")
+                except Exception as e:
+                    if self.args.verbose:
+                        print(f"{YELLOW}[!] Erro testando {url}: {str(e)}{ENDC}")
+                    continue
         
         if not detected:
-            print(f"{YELLOW}[!] Nenhum endpoint comum detectado{ENDC}")
+            print(f"{YELLOW}[!] Usando endpoints padrão como fallback{ENDC}")
+            netloc = urlparse(self.args.domain).netloc or self.args.domain
+            detected = [
+                f"https://{netloc}/api/auth",
+                f"https://{netloc}/auth",
+                f"https://{netloc}/login"
+            ]
         
         return detected
 
@@ -194,7 +209,7 @@ class Jupiter:
             'headers': headers,
             'params': params,
             'data': data,
-            'timeout': self.args.timeout
+            'timeout': getattr(self.args, 'timeout', 7.0)
         }
 
     def test_key(self, key, endpoint):
@@ -210,11 +225,11 @@ class Jupiter:
             valid = response.status_code in self.args.success_codes
             
             # Verificação de conteúdo adicional
-            if valid and self.args.content_check:
+            if valid and getattr(self.args, 'content_check', None):
                 valid = self.args.content_check.lower() in response.text.lower()
             
             # Verificação de padrão JSON para respostas bem formadas
-            if valid and self.args.json_check:
+            if valid and getattr(self.args, 'json_check', False):
                 try:
                     json.loads(response.text)
                 except ValueError:
@@ -243,7 +258,7 @@ class Jupiter:
         print(f"  Chaves: {total_keys}")
         print(f"  Endpoints: {total_endpoints}")
         print(f"  Testes: {total_tests}")
-        print(f"  Threads: {self.args.threads}")
+        print(f"  Threads: {getattr(self.args, 'threads', 15)}")
         print(f"  Autenticação: {self.auth_config['type'].upper()}")
         
         if self.auth_config['param']:
@@ -254,7 +269,7 @@ class Jupiter:
         
         test_counter = 0
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.threads) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=getattr(self.args, 'threads', 15)) as executor:
                 # Criar todas as combinações de chaves e endpoints
                 tasks = []
                 for key in self.keys:
@@ -278,12 +293,12 @@ class Jupiter:
                             print(f"\n{GREEN}{BOLD}[+] CHAVE VÁLIDA ENCONTRADA!{ENDC}")
                             print(f"{GREEN}    Chave: {key_value[:15]}...{key_value[-15:]}{ENDC}")
                             print(f"{GREEN}    Endpoint: {ep}{ENDC}")
-                            print(f"{GREEN}    Status: {response.status_code} | Tempo: {response_time:.2f}s{ENDC}")
-                            if response.text:
+                            print(f"{GREEN}    Status: {response.status_code if response else 'N/A'} | Tempo: {response_time:.2f}s{ENDC}")
+                            if response and response.text:
                                 print(f"{CYAN}    Resposta: {response.text[:100]}{'...' if len(response.text) > 100 else ''}{ENDC}")
                     
                     except Exception as e:
-                        if self.args.verbose:
+                        if getattr(self.args, 'verbose', False):
                             print(f"{RED}[!] Erro testando chave: {e}{ENDC}")
                     
                     # Atualizar progresso
@@ -293,13 +308,13 @@ class Jupiter:
                               f"Válidas: {self.stats['valid_keys']}{ENDC}", end='', flush=True)
                     
                     # Delay entre requisições
-                    if self.args.delay > 0:
+                    if getattr(self.args, 'delay', 0.1) > 0:
                         time.sleep(self.args.delay)
         except KeyboardInterrupt:
             print(f"\n{YELLOW}[!] Teste interrompido pelo usuário{ENDC}")
         
         # Salvar resultados
-        if self.args.output and self.valid_keys:
+        if getattr(self.args, 'output', None) and self.valid_keys:
             with open(self.args.output, 'w') as f:
                 for key, endpoint in self.valid_keys:
                     f.write(f"{key} | {endpoint}\n")
